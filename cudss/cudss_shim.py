@@ -38,8 +38,28 @@ _CONFIG_FALLBACK_ON_UNSUPPORTED = os.environ.get("DEVSIM_CUDSS_CONFIG_FALLBACK_O
     "yes",
     "on",
 }
+_RESIDUAL_FALLBACK_ENABLED = os.environ.get("DEVSIM_CUDSS_RESIDUAL_FALLBACK", "1").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+_RESIDUAL_FALLBACK_RATIO = float(os.environ.get("DEVSIM_CUDSS_RESIDUAL_FALLBACK_RATIO", "1e-2"))
+_RESIDUAL_FALLBACK_ABS = float(os.environ.get("DEVSIM_CUDSS_RESIDUAL_FALLBACK_ABS", "1e-10"))
+_VERIFY_FALLBACK_ENABLED = os.environ.get("DEVSIM_CUDSS_VERIFY_FALLBACK", "1").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+_VERIFY_FALLBACK_EARLY_SOLVE_CALLS = int(os.environ.get("DEVSIM_CUDSS_VERIFY_FALLBACK_EARLY_SOLVE_CALLS", "3"))
+_VERIFY_FALLBACK_MIN_SOLVE_CALL = int(os.environ.get("DEVSIM_CUDSS_VERIFY_FALLBACK_MIN_SOLVE_CALL", "20"))
+_VERIFY_FALLBACK_RHS_INF = float(os.environ.get("DEVSIM_CUDSS_VERIFY_FALLBACK_RHS_INF", "1e-12"))
+_VERIFY_FALLBACK_RESIDUAL_RATIO = float(os.environ.get("DEVSIM_CUDSS_VERIFY_FALLBACK_RESIDUAL_RATIO", "1e-4"))
+_VERIFY_FALLBACK_IMPROVEMENT = float(os.environ.get("DEVSIM_CUDSS_VERIFY_FALLBACK_IMPROVEMENT", "100.0"))
 _CTX_CACHE: Dict[tuple[int, bool], "_CuDSSContext"] = {}
 _LAST_CTX: Optional["_CuDSSContext"] = None
+_UMFPACK_RUNTIME: Optional[tuple[Any, Any]] = None
 
 
 def _dbg(msg: str) -> None:
@@ -441,11 +461,21 @@ class _CuDSSContext:
     solve_execute_seconds: float = 0.0
     solve_d2h_seconds: float = 0.0
     solve_call_breakdown: list[dict[str, float]] = None
+    host_ap: Optional[array.array] = None
+    host_ai: Optional[array.array] = None
+    host_ax: Optional[array.array] = None
+    residual_fallback_calls: int = 0
+    residual_fallback_active: bool = False
+    verify_fallback_calls: int = 0
 
     def destroy(self) -> None:
         if not self.bindings:
             return
         c = self.bindings.cudss
+        if self.data:
+            _check_cuda(self.bindings.cudart.cudaDeviceSynchronize(), "cudaDeviceSynchronize(destroy)")
+            c.cudssDataDestroy(self.handle, self.data)
+            self.data = ctypes.c_void_p()
         if self.mat_a:
             c.cudssMatrixDestroy(self.mat_a)
             self.mat_a = ctypes.c_void_p()
@@ -469,15 +499,17 @@ class _CuDSSContext:
             self.bindings.free_pinned(self.pinned_sol_host)
             self.pinned_sol_host = None
             self.pinned_sol_device = None
-        if self.data:
-            c.cudssDataDestroy(self.handle, self.data)
-            self.data = ctypes.c_void_p()
         if self.config:
             c.cudssConfigDestroy(self.config)
             self.config = ctypes.c_void_p()
         if self.handle:
             c.cudssDestroy(self.handle)
             self.handle = ctypes.c_void_p()
+        self.symbolic_ready = False
+        self.nnz = 0
+        self.sol_uses_mapped = False
+        self.config_set_applied = 0
+        self.config_fallback_used = False
 
     def reset_stats(self) -> None:
         self.factor_calls = 0
@@ -498,6 +530,9 @@ class _CuDSSContext:
         self.solve_execute_seconds = 0.0
         self.solve_d2h_seconds = 0.0
         self.solve_call_breakdown = []
+        self.residual_fallback_calls = 0
+        self.residual_fallback_active = False
+        self.verify_fallback_calls = 0
 
     def __del__(self) -> None:
         # Avoid invoking CUDA/cuDSS teardown during Python interpreter shutdown,
@@ -526,7 +561,133 @@ def get_last_stats() -> dict[str, object]:
         "solve_execute_seconds": ctx.solve_execute_seconds,
         "solve_d2h_seconds": ctx.solve_d2h_seconds,
         "solve_call_breakdown": breakdown,
+        "residual_fallback_calls": ctx.residual_fallback_calls,
+        "verify_fallback_calls": ctx.verify_fallback_calls,
     }
+
+
+def _csr_residual_inf(ap: array.array, ai: array.array, ax: array.array, x: array.array, b: array.array) -> float:
+    vmax = 0.0
+    for row in range(len(ap) - 1):
+        accum = 0.0
+        for idx in range(ap[row], ap[row + 1]):
+            accum += ax[idx] * x[ai[idx]]
+        diff = abs(accum - b[row])
+        if diff > vmax:
+            vmax = diff
+    return vmax
+
+
+def _csr_to_csc(n: int, ap: array.array, ai: array.array, ax: array.array) -> tuple[array.array, array.array, array.array]:
+    counts = [0] * n
+    for col in ai:
+        counts[int(col)] += 1
+    csc_ap_list = [0] * (n + 1)
+    for i in range(n):
+        csc_ap_list[i + 1] = csc_ap_list[i] + counts[i]
+    csc_ai = array.array(ai.typecode, [0]) * len(ai)
+    csc_ax = array.array("d", [0.0]) * len(ax)
+    next_pos = csc_ap_list[:-1].copy()
+    for row in range(n):
+        for idx in range(ap[row], ap[row + 1]):
+            col = int(ai[idx])
+            pos = next_pos[col]
+            csc_ai[pos] = row
+            csc_ax[pos] = ax[idx]
+            next_pos[col] += 1
+    csc_ap = array.array(ap.typecode, csc_ap_list)
+    return csc_ap, csc_ai, csc_ax
+
+
+def _get_umfpack_runtime() -> tuple[Any, Any]:
+    global _UMFPACK_RUNTIME
+    if _UMFPACK_RUNTIME is not None:
+        return _UMFPACK_RUNTIME
+
+    import devsim
+    from umfpack import umfpack_loader as umf
+
+    gdata = umf.global_data()
+    umf_name = os.path.basename(umf.get_umfpack_name())
+    umf_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "umfpack", umf_name)
+    gdata.dll = umf.load_umfpack_dll(umf_path)
+    mcount = 1
+    for blaslib in devsim.get_parameter(name="info")["math_libraries"]:
+        h = umf.load_blas_dll(gdata, blaslib=blaslib, noexcept=True)
+        if h:
+            mcount = umf.load_blas_functions(gdata, h)
+            if mcount == 0:
+                break
+    if mcount != 0:
+        raise RuntimeError(f"Missing {mcount} UMFPACK math functions")
+    _UMFPACK_RUNTIME = (umf, gdata)
+    return _UMFPACK_RUNTIME
+
+
+def _solve_with_umfpack_fallback(ctx: _CuDSSContext, bvec: array.array) -> array.array:
+    if ctx.host_ap is None or ctx.host_ai is None or ctx.host_ax is None:
+        raise _CuDSSError("UMFPACK fallback requested without cached matrix")
+    umf, gdata = _get_umfpack_runtime()
+    csc_ap, csc_ai, csc_ax = _csr_to_csc(ctx.n, ctx.host_ap, ctx.host_ai, ctx.host_ax)
+    uc = umf.umf_control(gdata, "real")
+    matrix = umf.matrix(uc=uc, Ap=csc_ap, Ai=csc_ai, Ax=csc_ax)
+    symbolic = uc.symbolic(matrix=matrix)
+    numeric = uc.numeric(matrix=matrix, Symbolic=symbolic)
+    x = array.array("d", bvec)
+    uc.solve(matrix=matrix, Numeric=numeric, b=bvec, transpose=ctx.transpose, x=x)
+    return x
+
+
+def _should_run_verify_fallback(solve_call_index: int, rhs_inf: float, residual_inf: float) -> bool:
+    if solve_call_index <= _VERIFY_FALLBACK_EARLY_SOLVE_CALLS:
+        return True
+    if solve_call_index < _VERIFY_FALLBACK_MIN_SOLVE_CALL:
+        return False
+    if rhs_inf <= _VERIFY_FALLBACK_RHS_INF:
+        return True
+    if rhs_inf == 0.0:
+        return residual_inf > 0.0
+    return (residual_inf / rhs_inf) >= _VERIFY_FALLBACK_RESIDUAL_RATIO
+
+
+def _initialize_ctx_runtime(ctx: _CuDSSContext) -> None:
+    if not ctx.bindings:
+        raise _CuDSSError(get_unavailable_message())
+    c = ctx.bindings.cudss
+    _check_cudss(c.cudssCreate(ctypes.byref(ctx.handle)), "cudssCreate")
+    # Configure CPU threading helper library when available (required by some runtimes).
+    thr_layer = None
+    for root in site.getsitepackages():
+        candidate = os.path.join(root, "nvidia", "cu12", "lib", "libcudss_mtlayer_gomp.so.0")
+        if os.path.isfile(candidate):
+            thr_layer = candidate
+            break
+    if thr_layer:
+        _check_cudss(
+            c.cudssSetThreadingLayer(ctx.handle, thr_layer.encode("utf-8")),
+            "cudssSetThreadingLayer",
+        )
+    _check_cudss(c.cudssConfigCreate(ctypes.byref(ctx.config)), "cudssConfigCreate")
+    if ctx.bindings.cudssConfigSet and ctx.config:
+        explicit_pairs = [*_named_config_pairs(), *_parse_config_set_pairs()]
+        explicit_params = {param for param, _ in explicit_pairs}
+        all_pairs = [*explicit_pairs, *_auto_config_pairs(ctx.n, explicit_params)]
+        for param, value in all_pairs:
+            v = ctypes.c_int(value)
+            status = ctx.bindings.cudssConfigSet(
+                ctx.config,
+                ctypes.c_int(param),
+                ctypes.byref(v),
+                ctypes.sizeof(v),
+            )
+            if status == CUDSS_STATUS_SUCCESS:
+                ctx.config_set_applied += 1
+            else:
+                _dbg(f"cudssConfigSet failed param={param} value={value} status={status}")
+    _check_cudss(c.cudssDataCreate(ctx.handle, ctypes.byref(ctx.data)), "cudssDataCreate")
+    ctx.symbolic_ready = False
+    ctx.nnz = 0
+    ctx.sol_uses_mapped = False
 
 
 def _make_ctx(n: int, transpose: bool) -> _CuDSSContext:
@@ -563,38 +724,7 @@ def _make_ctx(n: int, transpose: bool) -> _CuDSSContext:
         ctx.message = "cuDSS runtime detected; device_experimental result prefers zero-copy path"
     ctx.init_calls = 1
     ctx.solve_call_breakdown = []
-    c = bindings.cudss
-    _check_cudss(c.cudssCreate(ctypes.byref(ctx.handle)), "cudssCreate")
-    # Configure CPU threading helper library when available (required by some runtimes).
-    thr_layer = None
-    for root in site.getsitepackages():
-        candidate = os.path.join(root, "nvidia", "cu12", "lib", "libcudss_mtlayer_gomp.so.0")
-        if os.path.isfile(candidate):
-            thr_layer = candidate
-            break
-    if thr_layer:
-        _check_cudss(
-            c.cudssSetThreadingLayer(ctx.handle, thr_layer.encode("utf-8")),
-            "cudssSetThreadingLayer",
-        )
-    _check_cudss(c.cudssConfigCreate(ctypes.byref(ctx.config)), "cudssConfigCreate")
-    if bindings.cudssConfigSet and ctx.config:
-        explicit_pairs = [*_named_config_pairs(), *_parse_config_set_pairs()]
-        explicit_params = {param for param, _ in explicit_pairs}
-        all_pairs = [*explicit_pairs, *_auto_config_pairs(ctx.n, explicit_params)]
-        for param, value in all_pairs:
-            v = ctypes.c_int(value)
-            status = bindings.cudssConfigSet(
-                ctx.config,
-                ctypes.c_int(param),
-                ctypes.byref(v),
-                ctypes.sizeof(v),
-            )
-            if status == CUDSS_STATUS_SUCCESS:
-                ctx.config_set_applied += 1
-            else:
-                _dbg(f"cudssConfigSet failed param={param} value={value} status={status}")
-    _check_cudss(c.cudssDataCreate(ctx.handle, ctypes.byref(ctx.data)), "cudssDataCreate")
+    _initialize_ctx_runtime(ctx)
     if _REUSE_CONTEXT:
         _CTX_CACHE[cache_key] = ctx
     return ctx
@@ -640,6 +770,12 @@ def _factor(ctx: _CuDSSContext, kwargs: Dict[str, Any]) -> None:
         nnz = ctx.nnz
         if len(ax) != nnz:
             raise _CuDSSError(f"Ax length mismatch for cached symbolic pattern: got {len(ax)}, expected {nnz}")
+
+    if ap is not None:
+        ctx.host_ap = array.array(ap.typecode, ap)
+    if ai is not None:
+        ctx.host_ai = array.array(ai.typecode, ai)
+    ctx.host_ax = array.array("d", ax)
 
     b = ctx.bindings
     c = b.cudss
@@ -848,6 +984,21 @@ def _solve(ctx: _CuDSSContext, kwargs: Dict[str, Any]) -> array.array:
         raise _CuDSSError("Unexpected RHS payload type; expected array('d')")
     if len(bvec) != ctx.n:
         raise _CuDSSError(f"Invalid RHS length {len(bvec)}; expected {ctx.n}")
+    solve_call_index = int(kwargs.get("solve_call_index", ctx.solve_calls + 1))
+    if (
+        _RESIDUAL_FALLBACK_ENABLED
+        and ctx.residual_fallback_active
+        and ctx.host_ap is not None
+        and ctx.host_ai is not None
+        and ctx.host_ax is not None
+    ):
+        ctx.solve_calls += 1
+        fallback_x = _solve_with_umfpack_fallback(ctx, bvec)
+        ctx.residual_fallback_calls += 1
+        if ctx.host_x_cache is None:
+            ctx.host_x_cache = array.array("d", [0.0]) * ctx.n
+        ctx.host_x_cache[:] = fallback_x
+        return ctx.host_x_cache
 
     b = ctx.bindings
     c = b.cudss
@@ -971,6 +1122,36 @@ def _solve(ctx: _CuDSSContext, kwargs: Dict[str, Any]) -> array.array:
             lambda: b.copy_d2h(ctx.buffers.d_sol, ctx.n, out=ctx.host_x_cache),
             "D2H",
         )
+    if (
+        _RESIDUAL_FALLBACK_ENABLED
+        and ctx.host_ap is not None
+        and ctx.host_ai is not None
+        and ctx.host_ax is not None
+    ):
+        residual_inf = _csr_residual_inf(ctx.host_ap, ctx.host_ai, ctx.host_ax, ctx.host_x_cache, bvec)
+        rhs_inf = max((abs(v) for v in bvec), default=0.0)
+        residual_limit = max(_RESIDUAL_FALLBACK_ABS, _RESIDUAL_FALLBACK_RATIO * rhs_inf)
+        if residual_inf > residual_limit:
+            try:
+                fallback_x = _solve_with_umfpack_fallback(ctx, bvec)
+            except Exception as exc:
+                _dbg(f"UMFPACK residual fallback unavailable: {exc}")
+            else:
+                ctx.host_x_cache[:] = fallback_x
+                ctx.residual_fallback_calls += 1
+                ctx.residual_fallback_active = True
+        elif _VERIFY_FALLBACK_ENABLED and _should_run_verify_fallback(solve_call_index, rhs_inf, residual_inf):
+            try:
+                fallback_x = _solve_with_umfpack_fallback(ctx, bvec)
+                fallback_residual_inf = _csr_residual_inf(ctx.host_ap, ctx.host_ai, ctx.host_ax, fallback_x, bvec)
+            except Exception as exc:
+                _dbg(f"UMFPACK verify fallback unavailable: {exc}")
+            else:
+                improvement = residual_inf / max(fallback_residual_inf, 1.0e-300)
+                if improvement >= _VERIFY_FALLBACK_IMPROVEMENT:
+                    ctx.host_x_cache[:] = fallback_x
+                    ctx.verify_fallback_calls += 1
+                    ctx.residual_fallback_active = True
     if not use_zero_copy_result:
         ctx.d2h_bytes += ctx.n * ctypes.sizeof(ctypes.c_double)
     solve_elapsed = time.perf_counter() - solve_begin

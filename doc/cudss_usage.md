@@ -188,7 +188,10 @@ devsim.set_parameter(name="direct_solver", value="custom")
 devsim.set_parameter(name="solver_callback", value=umfpack_solver_callback)
 ```
 
-也就是说：baseline 分支是“按需覆盖”，cuDSS 分支是“显式切换到 `direct_solver=cudss` + cuDSS callback”。
+也就是说：baseline 分支是“按需覆盖”；cuDSS 分支会显式注入 cuDSS solver callback，而实际走 `custom callback` 还是 `native cudss`，由 `DEVSIM_CUDSS_DIRECT_SOLVER` 控制。
+
+- 直接运行 `pytest testing/pytest/test_cudss_compare.py` 时，若不额外设置环境变量，当前默认是 `DEVSIM_CUDSS_DIRECT_SOLVER=custom`；
+- `bash scripts/run_cudss_pytest_regression.sh` 会额外导出 `native+MT` 默认环境，因此这是“当前默认主线”的回归口径。
 
 ### 3.4 常用参数
 
@@ -244,7 +247,7 @@ pytest -q testing/pytest --solver-mode=both --timing-json=/tmp/cudss_timing.json
 
 ```bash
 pytest -q testing/pytest
-# 35 passed, 10 skipped, 30 xfailed
+# 60 passed, 15 skipped
 ```
 
 ## 4. 无 GPU/cuDSS 与 strict 模式行为
@@ -408,7 +411,7 @@ bash scripts/run_cudss_perf_cap_large.sh
 | baseline | `95.793514` | `59.205752` | - | - |
 | cudss native+MT（当前默认） | `47.482376` | `13.430366` | `2.017x` | `4.408x` |
 
-脚本还会额外打印两边的 `load_dc / linear_solve / device_update / finalize / clear` 分项中位数，便于直接对照 CPU 与 cuDSS 的各部分耗时。
+脚本还会额外打印两边的 `load_dc / linear_solve / device_update / finalize / clear` 分项中位数，便于直接对照 CPU 与 cuDSS 的 solver framework 开销分布。
 
 ### 7.2 P4（device assembly）现状
 
@@ -425,11 +428,14 @@ bash scripts/run_cudss_compare_cap_large.sh
 当前结果：
 
 - `cap2d_large` strict compare：`1 passed`
+- 全量 callback compare harness（`pytest -q testing/pytest/test_cudss_compare.py`）
+  - `60 passed, 15 skipped`
+  - 这条口径当前已**全部收口**：先用 `||Ax-b||∞` 守卫收掉 `ptest2` 这类明显线性残差失真 case，再用“每个 solve session 前 3 轮 second opinion”把 `mos_2d / diode / gmsh_mos2d` 这类早期病态 Jacobian 分支也切回 UMFPACK fallback。
 - 全量 `bash scripts/run_cudss_pytest_regression.sh`
-  - `35 passed, 10 skipped, 30 xfailed`
+  - `43 passed, 15 skipped, 17 xfailed`
   - `0 failed`
 
-结论：当前默认 `native+MT` 路径下，**当前主 case 与 baseline 对比正确，且整套 pytest 没有出现新的 hard fail**；其余未进入“正确通过”口径的主要是既有 `skip/xfail`，不是这轮 polish 引入的新失败。
+结论：当前默认 `native+MT` 路径下，**当前主 case 与 baseline 对比正确，且整套 pytest 没有出现新的 hard fail**；主线口径仍是 `43 passed, 15 skipped, 17 xfailed`。同时，callback compare harness 已从 `43/15/17` 继续收口到 **`60 passed, 15 skipped`**。另外，`examples/diode/diode_2d` 这类 `solve(info=True)` 结构化诊断输出现在也已按现有迭代日志同口径过滤，不再把 solver-only 诊断差异当成 correctness mismatch。
 
 ## 8. solver-other 新基线（百万级 custom 路径）
 

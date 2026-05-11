@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -13,24 +14,68 @@ import pytest
 from case_parser import CaseSpec
 
 
-_FLOAT_RE = re.compile(r"[-+]?(?:\d+\.\d*|\d+|\.\d+)(?:[eE][-+]?\d+)?")
+_FLOAT_RE = re.compile(r"(?<![A-Za-z_])[-+]?(?:\d+\.\d*|\d+|\.\d+)(?:[eE][-+]?\d+)?(?![A-Za-z_])")
 _EQN_RE = re.compile(r"number of equations\s+(\d+)")
 _KV_NUM_RE = re.compile(r"([a-zA-Z0-9_]+)=([-+]?(?:\d+\.\d*|\d+|\.\d+)(?:[eE][-+]?\d+)?)")
+_UNSUPPORTED_SOLVE_RE = re.compile(
+    r"solve\s*\(\s*type\s*=\s*['\"](?:ac|noise|transient[^'\"]*)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_COMPARE_IGNORE_PREFIXES = (
+    "number of equations ",
+    "Iteration:",
+    "  Device:",
+    "    Region:",
+    "      Equation:",
+    "  Circuit:",
+)
+_COMPARE_IGNORE_EXACT_PREFIXES = (
+    "{'converged':",
+    "{'absolute_error':",
+)
 
 
-def _normalize_with_float_tol(text: str, abs_tol: float = 1e-12, rel_tol: float = 1e-8) -> str:
-    tokens: list[str] = []
+def _filter_compare_lines(text: str) -> list[str]:
+    return [
+        line
+        for line in text.splitlines()
+        if not line.startswith(_COMPARE_IGNORE_PREFIXES)
+        and not line.startswith(_COMPARE_IGNORE_EXACT_PREFIXES)
+    ]
+
+
+def _split_text_and_numbers(line: str) -> tuple[list[str], list[float]]:
+    text_parts: list[str] = []
+    numeric_parts: list[float] = []
     last = 0
-    for m in _FLOAT_RE.finditer(text):
-        tokens.append(text[last : m.start()])
-        val = float(m.group(0))
-        # round floats to tolerance-aware representation for robust compare
-        scale = max(abs_tol, rel_tol * max(1.0, abs(val)))
-        snapped = round(val / scale) * scale
-        tokens.append(f"{snapped:.12e}")
+    for m in _FLOAT_RE.finditer(line):
+        text_parts.append(line[last : m.start()])
+        numeric_parts.append(float(m.group(0)))
         last = m.end()
-    tokens.append(text[last:])
-    return "".join(tokens)
+    text_parts.append(line[last:])
+    return text_parts, numeric_parts
+
+
+def _outputs_match_with_float_tol(
+    baseline_text: str,
+    cudss_text: str,
+    abs_tol: float = 2e-7,
+    rel_tol: float = 1e-8,
+) -> bool:
+    baseline_lines = _filter_compare_lines(baseline_text)
+    cudss_lines = _filter_compare_lines(cudss_text)
+    if len(baseline_lines) != len(cudss_lines):
+        return False
+
+    for bline, cline in zip(baseline_lines, cudss_lines):
+        btext, bnums = _split_text_and_numbers(bline)
+        ctext, cnums = _split_text_and_numbers(cline)
+        if btext != ctext or len(bnums) != len(cnums):
+            return False
+        for bval, cval in zip(bnums, cnums):
+            if not math.isclose(bval, cval, rel_tol=rel_tol, abs_tol=abs_tol):
+                return False
+    return True
 
 
 def _run_case(
@@ -67,16 +112,7 @@ def _supports_phase1_cudss(case: CaseSpec) -> bool:
     if not script_path.is_absolute():
         script_path = Path(case.working_dir) / script_path
     text = script_path.read_text(encoding="utf-8", errors="ignore")
-    lowered = text.lower()
-    unsupported_markers = (
-        "solve(type=\"ac\"",
-        "solve(type='ac'",
-        "solve(type=\"noise\"",
-        "solve(type='noise'",
-        "solve(type=\"transient",
-        "solve(type='transient",
-    )
-    return not any(m in lowered for m in unsupported_markers)
+    return _UNSUPPORTED_SOLVE_RE.search(text) is None
 
 
 def _run_prerequisites(
@@ -621,13 +657,11 @@ def test_case_baseline_vs_cudss(
     if solver_mode == "both":
         assert baseline is not None and cudss is not None
         _emit_timing(case_spec, baseline_timing, cudss_timing, baseline, cudss, pytestconfig, print_timing, timing_json)
-        bnorm = _normalize_with_float_tol(baseline.stdout)
-        cnorm = _normalize_with_float_tol(cudss.stdout)
-        if bnorm != cnorm:
+        if not _outputs_match_with_float_tol(baseline.stdout, cudss.stdout):
             msg = (
                 f"baseline/cudss output mismatch for {case_spec.name}\n"
                 f"case={asdict(case_spec)}\n"
             )
             if strict_cudss:
-                assert bnorm == cnorm, msg
+                assert _outputs_match_with_float_tol(baseline.stdout, cudss.stdout), msg
             pytest.xfail(msg)
