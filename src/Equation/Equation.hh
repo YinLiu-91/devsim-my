@@ -101,6 +101,7 @@ class Equation {
         }
 
         void Update(NodeModel &, const dsMath::DoubleVec_t<DoubleType> &);
+        bool TryUpdateFromDevice(NodeModel &, const dsMath::DeviceResultBuffer &);
 
         void ACUpdate(NodeModel &, const dsMath::ComplexDoubleVec_t<DoubleType> &);
         void NoiseUpdate(const std::string &, const std::vector<PermutationEntry> &, const dsMath::ComplexDoubleVec_t<DoubleType> &);
@@ -195,4 +196,3 @@ class Equation {
         EquationEnum::UpdateType updateType;
 };
 #endif
-

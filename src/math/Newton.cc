@@ -15,6 +15,7 @@ SPDX-License-Identifier: Apache-2.0
 #include "Preconditioner.hh"
 #include "SolverUtil.hh"
 #include "LinearSolver.hh"
+#include "ObjectHolder.hh"
 #include "Device.hh"
 #include "Region.hh"
 #include "EquationHolder.hh"
@@ -37,8 +38,76 @@ SPDX-License-Identifier: Apache-2.0
 #include <sstream>
 #include <iomanip>
 #include <cmath>
+#include <chrono>
 #include <cstdlib>
 using std::abs;
+
+namespace {
+bool IsCuDSSProfileEnabled()
+{
+  if (const auto *v = std::getenv("DEVSIM_CUDSS_PROFILE"))
+  {
+    const std::string val(v);
+    return (val == "1") || (val == "true") || (val == "TRUE") || (val == "on") || (val == "ON");
+  }
+  return false;
+}
+
+struct NewtonIterationProfile {
+  double total_seconds = 0.0;
+  double rhs_reset_seconds = 0.0;
+  double load_dc_seconds = 0.0;
+  double load_time_seconds = 0.0;
+  double result_resize_seconds = 0.0;
+  double finalize_seconds = 0.0;
+  double symbolic_status_seconds = 0.0;
+  double linear_solve_seconds = 0.0;
+  double result_prep_seconds = 0.0;
+  double device_update_seconds = 0.0;
+  double node_update_seconds = 0.0;
+  double print_seconds = 0.0;
+  double error_seconds = 0.0;
+  double clear_seconds = 0.0;
+  double other_seconds = 0.0;
+};
+
+struct NewtonSolveProfile {
+  double total_seconds = 0.0;
+  double setup_total_seconds = 0.0;
+  double setup_numbering_seconds = 0.0;
+  double setup_node_init_seconds = 0.0;
+  double setup_print_number_seconds = 0.0;
+  double setup_create_preconditioner_seconds = 0.0;
+  double setup_create_matrix_seconds = 0.0;
+  double setup_backup_solutions_seconds = 0.0;
+  double setup_permutation_seconds = 0.0;
+  double setup_transient_init_seconds = 0.0;
+  double setup_initial_rhs_seconds = 0.0;
+  double iteration_total_seconds = 0.0;
+  double iteration_rhs_reset_seconds = 0.0;
+  double iteration_load_dc_seconds = 0.0;
+  double iteration_load_time_seconds = 0.0;
+  double iteration_result_resize_seconds = 0.0;
+  double iteration_finalize_seconds = 0.0;
+  double iteration_symbolic_status_seconds = 0.0;
+  double iteration_linear_solve_seconds = 0.0;
+  double iteration_result_prep_seconds = 0.0;
+  double iteration_device_update_seconds = 0.0;
+  double iteration_node_update_seconds = 0.0;
+  double iteration_print_seconds = 0.0;
+  double iteration_error_seconds = 0.0;
+  double iteration_clear_seconds = 0.0;
+  double post_total_seconds = 0.0;
+  double post_transient_q_seconds = 0.0;
+  double post_transient_projection_seconds = 0.0;
+  double post_restore_seconds = 0.0;
+  double post_update_contacts_seconds = 0.0;
+  double post_node_finalize_seconds = 0.0;
+  double post_transient_i_seconds = 0.0;
+  double post_transient_current_seconds = 0.0;
+  std::vector<NewtonIterationProfile> iterations;
+};
+}
 
 namespace dsMath {
 
@@ -612,57 +681,79 @@ void Newton<DoubleType>::GetMatrixAndRHSForExternalUse(CompressionType ct, Objec
 template <typename DoubleType>
 bool Newton<DoubleType>::Solve(LinearSolver<DoubleType> &itermethod, const TimeMethods::TimeParams<DoubleType> &timeinfo, ObjectHolderMap_t *ohm)
 {
+  const bool profile_enabled = IsCuDSSProfileEnabled();
+  const auto solve_begin = std::chrono::steady_clock::now();
+  NewtonSolveProfile solve_profile;
   MasterGILControl gil;
 
   NodeKeeper &nk = NodeKeeper::instance();
   GlobalData &gdata = GlobalData::GetInstance();
   const GlobalData::DeviceList_t      &dlist = gdata.GetDeviceList();
+  auto section_begin = std::chrono::steady_clock::now();
+  const auto setup_begin = section_begin;
 
   const size_t numeqns = NumberEquationsAndSetDimension();
+  solve_profile.setup_numbering_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
+  section_begin = std::chrono::steady_clock::now();
   if (nk.HaveNodes())
   {
     nk.InitializeSolution("dcop");
   }
+  solve_profile.setup_node_init_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
+  section_begin = std::chrono::steady_clock::now();
   PrintNumberEquations(numeqns, ohm);
+  solve_profile.setup_print_number_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
   std::unique_ptr<Preconditioner<DoubleType>> preconditioner;
-
   std::unique_ptr<Matrix<DoubleType>> matrix;
 
+  section_begin = std::chrono::steady_clock::now();
   preconditioner = std::unique_ptr<Preconditioner<DoubleType>>(CreatePreconditioner(itermethod, numeqns));
+  solve_profile.setup_create_preconditioner_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
+  section_begin = std::chrono::steady_clock::now();
   matrix = std::unique_ptr<Matrix<DoubleType>>(CreateMatrix(preconditioner.get()));
+  solve_profile.setup_create_matrix_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
   DoubleVec_t<DoubleType> rhs(numeqns);
 
   bool converged = false;
 
+  section_begin = std::chrono::steady_clock::now();
   BackupSolutions();
+  solve_profile.setup_backup_solutions_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
   /////
   ///// Permutation vector
   /////
+  section_begin = std::chrono::steady_clock::now();
   permvec_t permvec(numeqns);
   for (size_t i = 0; i < permvec.size(); ++i)
   {
     permvec[i] = PermutationEntry(i, false);
   }
+  solve_profile.setup_permutation_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
   DoubleVec_t<DoubleType> result(numeqns);
 
   DoubleVec_t<DoubleType> rhs_constant(numeqns);
   if (!timeinfo.IsDCMethod())
   {
+    section_begin = std::chrono::steady_clock::now();
     InitializeTransientAssemble(timeinfo, numeqns, rhs_constant);
+    solve_profile.setup_transient_init_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
   }
 
-
+  section_begin = std::chrono::steady_clock::now();
   LoadMatrixAndRHS(*matrix, rhs, permvec, dsMathEnum::WhatToLoad::PERMUTATIONSONLY, dsMathEnum::TimeMode::DC, static_cast<DoubleType>(1.0));
+  solve_profile.setup_initial_rhs_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
+  solve_profile.setup_total_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - setup_begin).count();
 
   size_t divergence_count = 0;
   bool   max_error_hit = false;
+  bool   saw_device_experimental_result = false;
   DoubleType last_rel_err = 0.0;
   DoubleType last_abs_err = 0.0;
 
@@ -672,6 +763,9 @@ bool Newton<DoubleType>::Solve(LinearSolver<DoubleType> &itermethod, const TimeM
 
   for (size_t iter = 0; (iter < maxiter) && (!converged) && (divergence_count < maxDivergenceCount); ++iter)
   {
+    const auto iter_begin = std::chrono::steady_clock::now();
+    NewtonIterationProfile iter_profile;
+
     if (max_error_hit)
     {
       break;
@@ -684,34 +778,40 @@ bool Newton<DoubleType>::Solve(LinearSolver<DoubleType> &itermethod, const TimeM
       p_iteration_map = &iteration_map;
     }
 
+    section_begin = std::chrono::steady_clock::now();
     rhs = rhs_constant;
+    iter_profile.rhs_reset_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
-//        std::cerr << "Begin Load Matrix\n";
-    /// This is the resistive portion (always assembled
     if (timeinfo.IsDCOnly())
     {
+      section_begin = std::chrono::steady_clock::now();
       LoadMatrixAndRHS(*matrix, rhs, permvec, dsMathEnum::WhatToLoad::MATRIXANDRHS, dsMathEnum::TimeMode::DC, static_cast<DoubleType>(1.0));
+      iter_profile.load_dc_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
     }
     else
     {
+      section_begin = std::chrono::steady_clock::now();
       LoadMatrixAndRHS(*matrix, rhs, permvec, dsMathEnum::WhatToLoad::MATRIXANDRHS, dsMathEnum::TimeMode::DC, timeinfo.b0);
+      iter_profile.load_dc_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
-      /// This assembles the time derivative current
       if (timeinfo.a0 != 0.0)
       {
+        section_begin = std::chrono::steady_clock::now();
         LoadMatrixAndRHS(*matrix, rhs, permvec, dsMathEnum::WhatToLoad::MATRIXANDRHS, dsMathEnum::TimeMode::TIME, timeinfo.a0);
+        iter_profile.load_time_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
       }
     }
 
-//        std::cerr << "End Load Matrix\n";
-
+    section_begin = std::chrono::steady_clock::now();
     result.clear();
     result.resize(numeqns);
+    iter_profile.result_resize_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
+    section_begin = std::chrono::steady_clock::now();
     matrix->Finalize();
+    iter_profile.finalize_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
-//        std::cerr << "Begin Solve Matrix\n";
-    // iter is 0 based
+    section_begin = std::chrono::steady_clock::now();
     if (iter < symbolic_iter_max)
     {
       if (auto cm = dynamic_cast<CompressedMatrix<DoubleType> *>(matrix.get()); cm)
@@ -719,14 +819,65 @@ bool Newton<DoubleType>::Solve(LinearSolver<DoubleType> &itermethod, const TimeM
         cm->SetSymbolicStatus(SymbolicStatus_t::NEW_SYMBOLIC);
       }
     }
+    iter_profile.symbolic_status_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
+    section_begin = std::chrono::steady_clock::now();
     bool solveok = itermethod.Solve(*matrix, *preconditioner, result, rhs);
+    iter_profile.linear_solve_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
     if (!solveok)
     {
+      iter_profile.total_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - iter_begin).count();
+      iter_profile.other_seconds = std::max(
+        0.0,
+        iter_profile.total_seconds
+          - iter_profile.rhs_reset_seconds
+          - iter_profile.load_dc_seconds
+          - iter_profile.load_time_seconds
+          - iter_profile.result_resize_seconds
+          - iter_profile.finalize_seconds
+          - iter_profile.symbolic_status_seconds
+          - iter_profile.linear_solve_seconds
+      );
+      solve_profile.iterations.push_back(iter_profile);
+      solve_profile.iteration_total_seconds += iter_profile.total_seconds;
+      solve_profile.iteration_rhs_reset_seconds += iter_profile.rhs_reset_seconds;
+      solve_profile.iteration_load_dc_seconds += iter_profile.load_dc_seconds;
+      solve_profile.iteration_load_time_seconds += iter_profile.load_time_seconds;
+      solve_profile.iteration_result_resize_seconds += iter_profile.result_resize_seconds;
+      solve_profile.iteration_finalize_seconds += iter_profile.finalize_seconds;
+      solve_profile.iteration_symbolic_status_seconds += iter_profile.symbolic_status_seconds;
+      solve_profile.iteration_linear_solve_seconds += iter_profile.linear_solve_seconds;
       break;
     }
-//        std::cerr << "End Solve Matrix\n";
 
+    section_begin = std::chrono::steady_clock::now();
+    auto result_view = preconditioner->GetResultView();
+    {
+      const std::string location = result_view.location;
+      const std::string token = result_view.device_token;
+      if (location.rfind("device_experimental", 0) == 0)
+      {
+        saw_device_experimental_result = true;
+      }
+      if (p_iteration_map && !token.empty())
+      {
+        (*p_iteration_map)["cudss_result_location"] = ObjectHolder(location);
+        (*p_iteration_map)["cudss_device_token"] = ObjectHolder(token);
+      }
+    }
+    if (result_view.host_values == nullptr)
+    {
+      const bool device_experimental_path = (result_view.location.rfind("device_experimental", 0) == 0);
+      const bool need_host_vector =
+        nk.HaveNodes() || !device_experimental_path || (result_view.host_payload == nullptr);
+      if (need_host_vector)
+      {
+        result_view.host_values = &result;
+      }
+    }
+    iter_profile.result_prep_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
+
+    section_begin = std::chrono::steady_clock::now();
     {
       GlobalData::DeviceList_t::const_iterator dit  = dlist.begin();
       GlobalData::DeviceList_t::const_iterator dend = dlist.end();
@@ -734,17 +885,24 @@ bool Newton<DoubleType>::Solve(LinearSolver<DoubleType> &itermethod, const TimeM
       {
         std::string name = (dit->first);
         Device *dev =      (dit->second);
-        dev->Update(result);
+        dev->Update(result_view);
       }
     }
+    iter_profile.device_update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
     if (nk.HaveNodes())
     {
+      section_begin = std::chrono::steady_clock::now();
       CallUpdateSolution(nk, "dcop", result);
       nk.TriggerCallbacksOnNodes();
+      iter_profile.node_update_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
     }
 
+    section_begin = std::chrono::steady_clock::now();
     PrintIteration(iter, p_iteration_map);
+    iter_profile.print_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
+
+    section_begin = std::chrono::steady_clock::now();
     {
       converged = true;
       GlobalData::DeviceList_t::const_iterator dit  = dlist.begin();
@@ -767,8 +925,6 @@ bool Newton<DoubleType>::Solve(LinearSolver<DoubleType> &itermethod, const TimeM
           PrintDeviceErrors(device, ohm);
         }
 
-
-        /* if are our is higher than our convergence criteria and it is running away*/
         bool diverged = ((devrerr > relLimit) && (devrerr > last_rel_err))
            || ((devaerr > absLimit) && (devaerr > last_abs_err));
         if (diverged)
@@ -800,36 +956,78 @@ bool Newton<DoubleType>::Solve(LinearSolver<DoubleType> &itermethod, const TimeM
         max_error_hit = max_error_hit || (ciraerr > maxLimit);
       }
     }
+    iter_profile.error_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
+    section_begin = std::chrono::steady_clock::now();
     matrix->ClearMatrix();
+    iter_profile.clear_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
     if (p_iteration_map)
     {
       iteration_list.push_back(ObjectHolder(iteration_map));
     }
+
+    iter_profile.total_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - iter_begin).count();
+    iter_profile.other_seconds = std::max(
+      0.0,
+      iter_profile.total_seconds
+        - iter_profile.rhs_reset_seconds
+        - iter_profile.load_dc_seconds
+        - iter_profile.load_time_seconds
+        - iter_profile.result_resize_seconds
+        - iter_profile.finalize_seconds
+        - iter_profile.symbolic_status_seconds
+        - iter_profile.linear_solve_seconds
+        - iter_profile.result_prep_seconds
+        - iter_profile.device_update_seconds
+        - iter_profile.node_update_seconds
+        - iter_profile.print_seconds
+        - iter_profile.error_seconds
+        - iter_profile.clear_seconds
+    );
+    solve_profile.iterations.push_back(iter_profile);
+    solve_profile.iteration_total_seconds += iter_profile.total_seconds;
+    solve_profile.iteration_rhs_reset_seconds += iter_profile.rhs_reset_seconds;
+    solve_profile.iteration_load_dc_seconds += iter_profile.load_dc_seconds;
+    solve_profile.iteration_load_time_seconds += iter_profile.load_time_seconds;
+    solve_profile.iteration_result_resize_seconds += iter_profile.result_resize_seconds;
+    solve_profile.iteration_finalize_seconds += iter_profile.finalize_seconds;
+    solve_profile.iteration_symbolic_status_seconds += iter_profile.symbolic_status_seconds;
+    solve_profile.iteration_linear_solve_seconds += iter_profile.linear_solve_seconds;
+    solve_profile.iteration_result_prep_seconds += iter_profile.result_prep_seconds;
+    solve_profile.iteration_device_update_seconds += iter_profile.device_update_seconds;
+    solve_profile.iteration_node_update_seconds += iter_profile.node_update_seconds;
+    solve_profile.iteration_print_seconds += iter_profile.print_seconds;
+    solve_profile.iteration_error_seconds += iter_profile.error_seconds;
+    solve_profile.iteration_clear_seconds += iter_profile.clear_seconds;
   }
 
   DoubleVec_t<DoubleType> newI;
   DoubleVec_t<DoubleType> newQ;
+  const auto post_begin = std::chrono::steady_clock::now();
   if (timeinfo.IsTransient())
   {
-    //// New charge based on new assemble
     newQ.resize(numeqns);
+    section_begin = std::chrono::steady_clock::now();
     LoadMatrixAndRHS(*matrix, newQ, permvec, dsMathEnum::WhatToLoad::RHS, dsMathEnum::TimeMode::TIME, static_cast<DoubleType>(1.0));
+    solve_profile.post_transient_q_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
-    //// Check to see if your projection was correct
     if (timeinfo.IsIntegration())
     {
+      section_begin = std::chrono::steady_clock::now();
       converged = converged && CheckTransientProjection(timeinfo, newQ, ohm);
+      solve_profile.post_transient_projection_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
     }
   }
 
   if (!converged)
   {
+    section_begin = std::chrono::steady_clock::now();
     RestoreSolutions();
+    solve_profile.post_restore_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
   }
   else
   {
-
+    section_begin = std::chrono::steady_clock::now();
     GlobalData::DeviceList_t::const_iterator dit  = dlist.begin();
     GlobalData::DeviceList_t::const_iterator dend = dlist.end();
     for ( ; dit != dend; ++dit)
@@ -838,29 +1036,153 @@ bool Newton<DoubleType>::Solve(LinearSolver<DoubleType> &itermethod, const TimeM
       Device *dev =      (dit->second);
       dev->UpdateContacts();
     }
+    solve_profile.post_update_contacts_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
 
     if (nk.HaveNodes())
     {
+      section_begin = std::chrono::steady_clock::now();
       auto dbent = gdata.GetDBEntryOnGlobal("debug_level");
       if (OutputStream::GetVerbosity(dbent.second.GetString()) != OutputStream::Verbosity_t::V0)
       {
         nk.PrintSolution("dcop");
       }
+      solve_profile.post_node_finalize_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
     }
 
     if (timeinfo.IsTransient())
     {
       newI.resize(numeqns);
+      section_begin = std::chrono::steady_clock::now();
       LoadMatrixAndRHS(*matrix, newI, permvec, dsMathEnum::WhatToLoad::RHS, dsMathEnum::TimeMode::DC, static_cast<DoubleType>(1.0));
+      solve_profile.post_transient_i_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
+      section_begin = std::chrono::steady_clock::now();
       UpdateTransientCurrent(timeinfo, numeqns, newI, newQ);
+      solve_profile.post_transient_current_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - section_begin).count();
     }
-
   }
+  solve_profile.post_total_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - post_begin).count();
 
   if (ohm)
   {
     (*ohm)["iterations"] = ObjectHolder(iteration_list);
     (*ohm)["converged"] = ObjectHolder(converged);
+    (*ohm)["cudss_device_experimental_observed"] = ObjectHolder(saw_device_experimental_result);
+  }
+
+  solve_profile.total_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_begin).count();
+  if (profile_enabled)
+  {
+    const double setup_other_seconds = std::max(
+      0.0,
+      solve_profile.setup_total_seconds
+        - solve_profile.setup_numbering_seconds
+        - solve_profile.setup_node_init_seconds
+        - solve_profile.setup_print_number_seconds
+        - solve_profile.setup_create_preconditioner_seconds
+        - solve_profile.setup_create_matrix_seconds
+        - solve_profile.setup_backup_solutions_seconds
+        - solve_profile.setup_permutation_seconds
+        - solve_profile.setup_transient_init_seconds
+        - solve_profile.setup_initial_rhs_seconds
+    );
+    const double iteration_other_seconds = std::max(
+      0.0,
+      solve_profile.iteration_total_seconds
+        - solve_profile.iteration_rhs_reset_seconds
+        - solve_profile.iteration_load_dc_seconds
+        - solve_profile.iteration_load_time_seconds
+        - solve_profile.iteration_result_resize_seconds
+        - solve_profile.iteration_finalize_seconds
+        - solve_profile.iteration_symbolic_status_seconds
+        - solve_profile.iteration_linear_solve_seconds
+        - solve_profile.iteration_result_prep_seconds
+        - solve_profile.iteration_device_update_seconds
+        - solve_profile.iteration_node_update_seconds
+        - solve_profile.iteration_print_seconds
+        - solve_profile.iteration_error_seconds
+        - solve_profile.iteration_clear_seconds
+    );
+    const double post_other_seconds = std::max(
+      0.0,
+      solve_profile.post_total_seconds
+        - solve_profile.post_transient_q_seconds
+        - solve_profile.post_transient_projection_seconds
+        - solve_profile.post_restore_seconds
+        - solve_profile.post_update_contacts_seconds
+        - solve_profile.post_node_finalize_seconds
+        - solve_profile.post_transient_i_seconds
+        - solve_profile.post_transient_current_seconds
+    );
+    const double total_other_seconds = std::max(
+      0.0,
+      solve_profile.total_seconds
+        - solve_profile.setup_total_seconds
+        - solve_profile.iteration_total_seconds
+        - solve_profile.post_total_seconds
+    );
+
+    std::ostringstream os;
+    os << "cuDSS solver profile:"
+       << " iterations=" << solve_profile.iterations.size()
+       << " total_seconds=" << solve_profile.total_seconds
+       << " setup_total_seconds=" << solve_profile.setup_total_seconds
+       << " setup_numbering_seconds=" << solve_profile.setup_numbering_seconds
+       << " setup_node_init_seconds=" << solve_profile.setup_node_init_seconds
+       << " setup_print_number_seconds=" << solve_profile.setup_print_number_seconds
+       << " setup_create_preconditioner_seconds=" << solve_profile.setup_create_preconditioner_seconds
+       << " setup_create_matrix_seconds=" << solve_profile.setup_create_matrix_seconds
+       << " setup_backup_solutions_seconds=" << solve_profile.setup_backup_solutions_seconds
+       << " setup_permutation_seconds=" << solve_profile.setup_permutation_seconds
+       << " setup_transient_init_seconds=" << solve_profile.setup_transient_init_seconds
+       << " setup_initial_rhs_seconds=" << solve_profile.setup_initial_rhs_seconds
+       << " setup_other_seconds=" << setup_other_seconds
+       << " iteration_total_seconds=" << solve_profile.iteration_total_seconds
+       << " iteration_rhs_reset_seconds=" << solve_profile.iteration_rhs_reset_seconds
+       << " iteration_load_dc_seconds=" << solve_profile.iteration_load_dc_seconds
+       << " iteration_load_time_seconds=" << solve_profile.iteration_load_time_seconds
+       << " iteration_result_resize_seconds=" << solve_profile.iteration_result_resize_seconds
+       << " iteration_finalize_seconds=" << solve_profile.iteration_finalize_seconds
+       << " iteration_symbolic_status_seconds=" << solve_profile.iteration_symbolic_status_seconds
+       << " iteration_linear_solve_seconds=" << solve_profile.iteration_linear_solve_seconds
+       << " iteration_result_prep_seconds=" << solve_profile.iteration_result_prep_seconds
+       << " iteration_device_update_seconds=" << solve_profile.iteration_device_update_seconds
+       << " iteration_node_update_seconds=" << solve_profile.iteration_node_update_seconds
+       << " iteration_print_seconds=" << solve_profile.iteration_print_seconds
+       << " iteration_error_seconds=" << solve_profile.iteration_error_seconds
+       << " iteration_clear_seconds=" << solve_profile.iteration_clear_seconds
+       << " iteration_other_seconds=" << iteration_other_seconds
+       << " post_total_seconds=" << solve_profile.post_total_seconds
+       << " post_transient_q_seconds=" << solve_profile.post_transient_q_seconds
+       << " post_transient_projection_seconds=" << solve_profile.post_transient_projection_seconds
+       << " post_restore_seconds=" << solve_profile.post_restore_seconds
+       << " post_update_contacts_seconds=" << solve_profile.post_update_contacts_seconds
+       << " post_node_finalize_seconds=" << solve_profile.post_node_finalize_seconds
+       << " post_transient_i_seconds=" << solve_profile.post_transient_i_seconds
+       << " post_transient_current_seconds=" << solve_profile.post_transient_current_seconds
+       << " post_other_seconds=" << post_other_seconds
+       << " total_other_seconds=" << total_other_seconds << "\n";
+    for (size_t i = 0; i < solve_profile.iterations.size(); ++i)
+    {
+      const auto &iter_profile = solve_profile.iterations[i];
+      os << "cuDSS solver iteration:"
+         << " iter=" << i
+         << " total_seconds=" << iter_profile.total_seconds
+         << " rhs_reset_seconds=" << iter_profile.rhs_reset_seconds
+         << " load_dc_seconds=" << iter_profile.load_dc_seconds
+         << " load_time_seconds=" << iter_profile.load_time_seconds
+         << " result_resize_seconds=" << iter_profile.result_resize_seconds
+         << " finalize_seconds=" << iter_profile.finalize_seconds
+         << " symbolic_status_seconds=" << iter_profile.symbolic_status_seconds
+         << " linear_solve_seconds=" << iter_profile.linear_solve_seconds
+         << " result_prep_seconds=" << iter_profile.result_prep_seconds
+         << " device_update_seconds=" << iter_profile.device_update_seconds
+         << " node_update_seconds=" << iter_profile.node_update_seconds
+         << " print_seconds=" << iter_profile.print_seconds
+         << " error_seconds=" << iter_profile.error_seconds
+         << " clear_seconds=" << iter_profile.clear_seconds
+         << " other_seconds=" << iter_profile.other_seconds << "\n";
+    }
+    OutputStream::WriteOut(OutputStream::OutputType::INFO, os.str());
   }
 
   return converged;
@@ -1494,4 +1816,3 @@ template class Newton<double>;
 template class Newton<float128>;
 #endif
 }/// end namespace dsMath
-

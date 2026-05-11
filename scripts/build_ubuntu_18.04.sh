@@ -14,7 +14,7 @@ export PYTHON3_INCLUDE=$(python3 -c "from sysconfig import get_paths as gp; prin
 export PYTHON3_ARCHIVE=""
 
 # SYMDIFF build
-(cd external/symdiff && bash ../symdiff_centos.sh && cd linux_x86_64_release && make -j3);
+(cd external/symdiff && bash ../symdiff_centos.sh && cd linux_x86_64_debug && make -j3);
 
 # quad precision getrf
 (cd external/getrf && bash setup_centos6.sh && cd build && make -j3)

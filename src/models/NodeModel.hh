@@ -83,6 +83,8 @@ class NodeModel : public std::enable_shared_from_this<NodeModel> {
 
         template <typename DoubleType>
         void SetValues(const DoubleType &);
+        template <typename DoubleType>
+        void SetValues(const DoubleType *, size_t);
 
         const Region &GetRegion() const
         {
@@ -162,6 +164,8 @@ class NodeModel : public std::enable_shared_from_this<NodeModel> {
 
         template <typename DoubleType>
         void SetValues(const DoubleType &) const;
+        template <typename DoubleType>
+        void SetValues(const DoubleType *, size_t) const;
 
         void MarkOld() const;
 
@@ -206,4 +210,3 @@ NodeModelPtr create_node_model(bool use_extended, Args &&...args)
   return ret;
 }
 #endif
-

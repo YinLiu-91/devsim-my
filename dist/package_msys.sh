@@ -56,6 +56,7 @@ do
 rsync -aqP --delete ../$i ${DIST_DIR}
 done
 rsync -aqP --delete ../python_packages ${DIST_PYDLL}
+rsync -aqP --delete ../cudss ${DIST_PYDLL}
 
 mkdir -p ${DIST_DIR}/examples/symdiff
 # add trailing slash for rsync
@@ -92,4 +93,3 @@ cp -v __init__.py ${DIST_PYDLL}
 zip -r ${DIST_VER}.zip ${DIST_DIR}
 
 done
-

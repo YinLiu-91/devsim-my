@@ -13,6 +13,7 @@ SPDX-License-Identifier: Apache-2.0
 #ifdef USE_SUPERLU_PRECONDITIONER
 #include "SuperLUPreconditioner.hh"
 #endif
+#include "CuDSSPreconditioner.hh"
 #include "ExternalPreconditioner.hh"
 #include "LinearSolver.hh"
 #if defined(USE_ITERATIVE_SOLVER)
@@ -34,6 +35,7 @@ enum class DirectSolver {
   UNKNOWN,
   MKLPARDISO,
   SUPERLU,
+  CUDSS,
   CUSTOM,
 };
 
@@ -88,17 +90,21 @@ DirectSolver GetDirectSolver()
         OutputStream::WriteOut(OutputStream::OutputType::FATAL, os.str());
       }
     }
+    else if (val == "cudss")
+    {
+      ret = DirectSolver::CUDSS;
+    }
     else
     {
       std::ostringstream os;
-      os << "Unrecognized \"direct_solver\" parameter value \"" << val << "\". Valid options are \"mkl_pardiso\", \"superlu\" or \"custom\".\n";
+      os << "Unrecognized \"direct_solver\" parameter value \"" << val << "\". Valid options are \"mkl_pardiso\", \"superlu\", \"cudss\" or \"custom\".\n";
       OutputStream::WriteOut(OutputStream::OutputType::FATAL, os.str());
     }
     return ret;
   }
 
   std::ostringstream os;
-  os << "Parameter \"direct_solver\" parameter not set. Valid options are \"mkl_pardiso\", or \"custom\".\n";
+  os << "Parameter \"direct_solver\" parameter not set. Valid options are \"mkl_pardiso\", \"cudss\", or \"custom\".\n";
 
 #if defined(USE_MKL_PARDISO)
   if (MathLoader::IsMKLLoaded())
@@ -134,6 +140,21 @@ dsMath::Preconditioner<T> *CreateExternalPreconditioner(size_t numeqns, dsMath::
   }
   return p;
 }
+
+template <typename T>
+dsMath::Preconditioner<T> *CreateCuDSSPreconditioner(size_t numeqns, dsMath::PEnum::TransposeType_t transtype, std::string &errorstring)
+{
+  auto p = new dsMath::CuDSSPreconditioner<T>(numeqns, transtype);
+  auto &gdata = GlobalData::GetInstance();
+  ObjectHolder callback;
+  if (auto dbent = gdata.GetDBEntryOnGlobal("solver_callback"); dbent.first)
+  {
+    callback = dbent.second;
+  }
+  bool ret = p->init(callback, errorstring);
+  dsAssert(ret, errorstring);
+  return p;
+}
 }
 
 namespace dsMath
@@ -161,6 +182,12 @@ Preconditioner<T> *CreateDirectPreconditioner(size_t numeqns)
     preconditioner = new SuperLUPreconditioner<T>(numeqns, PEnum::TransposeType_t::NOTRANS, PEnum::LUType_t::FULL);
   }
 #endif
+  else if (s == DirectSolver::CUDSS)
+  {
+    std::string errorstring;
+    preconditioner = CreateCuDSSPreconditioner<T>(numeqns, PEnum::TransposeType_t::NOTRANS, errorstring);
+    dsAssert(preconditioner, errorstring);
+  }
   else
   {
     dsAssert(false, "Unexpected Solver Type");
@@ -211,6 +238,12 @@ Preconditioner<DoubleType> *CreateACPreconditioner(PEnum::TransposeType_t trans_
       preconditioner = new SuperLUPreconditioner<DoubleType>(numeqns, trans_type, PEnum::LUType_t::FULL);
     }
 #endif
+    else if (s == DirectSolver::CUDSS)
+    {
+      std::string errorstring;
+      preconditioner = CreateCuDSSPreconditioner<DoubleType>(numeqns, trans_type, errorstring);
+      dsAssert(preconditioner, errorstring);
+    }
     else
     {
       dsAssert(false, "Unexpected Solver Type");
@@ -253,4 +286,3 @@ template CompressedMatrix<float128> *CreateMatrix(Preconditioner<float128> *prec
 template CompressedMatrix<float128> *CreateACMatrix(Preconditioner<float128> *preconditioner);
 #endif
 }
-

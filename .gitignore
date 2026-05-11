@@ -2,12 +2,18 @@
 external/getrf/build/
 external/SuperLU_4.3/
 examples/*/*.out
+examples/*/*.vtu
+examples/*/*.msh
+examples/*/*.dat
+examples/*/*.visit
+examples/*/*.vtm
 testing/*.out
 testing/*.flps
 testing/*.vtu
 testing/*.vtm
 testing/*.visit
 testing/*.msh
+testing/pytest/timing_report.jsonl
 
 # Ignore generated directories
 linux*/

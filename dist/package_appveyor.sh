@@ -68,6 +68,7 @@ cp -R ../$i ${DIST_DIR}
 done
 cp -R ../python_packages ${DIST_PYDLL}
 cp -R ../umfpack ${DIST_PYDLL}/umfpack
+cp -R ../cudss ${DIST_PYDLL}/cudss
 
 # Copy UMFPACK DLL
 cp -v ${UMFPACK_LIBRARY_FILE} ${DIST_PYDLL}/umfpack
@@ -87,4 +88,3 @@ commit ${COMMIT}
 EOF
 /usr/bin/zip -r ${DIST_DIR}.zip ${DIST_DIR}
 done
-

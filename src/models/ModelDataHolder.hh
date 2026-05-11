@@ -62,9 +62,13 @@ class ModelDataHolder
 
     template <typename DoubleType>
     void set_indexes(const std::vector<size_t> &/*indexes*/, const DoubleType &/*v*/);
+    template <typename DoubleType>
+    void set_indexes(const std::vector<size_t> &/*indexes*/, const DoubleType * /*v*/, size_t /*length*/);
 
     template <typename DoubleType>
     void set_values(const DoubleType &/*v*/);
+    template <typename DoubleType>
+    void set_values(const DoubleType * /*v*/, size_t /*length*/);
 
     void clear() const;
 
@@ -87,4 +91,3 @@ class ModelDataHolder
 };
 
 #endif
-

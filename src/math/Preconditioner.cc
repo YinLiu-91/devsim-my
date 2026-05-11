@@ -17,7 +17,7 @@ Preconditioner<DoubleType>::~Preconditioner()
 }
 
 template <typename DoubleType>
-Preconditioner<DoubleType>::Preconditioner(size_t numeqns, PEnum::TransposeType_t transpose) : size_(numeqns), factored(false), transpose_solve_(transpose), matrix_(nullptr)
+Preconditioner<DoubleType>::Preconditioner(size_t numeqns, PEnum::TransposeType_t transpose) : size_(numeqns), factored(false), transpose_solve_(transpose), matrix_(nullptr), last_host_result_(nullptr)
 {
 }
 
@@ -33,6 +33,7 @@ bool Preconditioner<DoubleType>::LUFactor(Matrix<DoubleType> *mat)
 
   factored = false;
   matrix_ = mat;
+  last_host_result_ = nullptr;
 
   FPECheck::ClearFPE();
 
@@ -84,6 +85,7 @@ bool Preconditioner<DoubleType>::LUSolve(DoubleVec_t<DoubleType> &x, const Doubl
   }
   else
   {
+    last_host_result_ = &x;
     ret = true;
   }
 
@@ -116,6 +118,7 @@ bool Preconditioner<DoubleType>::LUSolve(ComplexDoubleVec_t<DoubleType> &x, cons
   }
   else
   {
+    last_host_result_ = nullptr;
     ret = true;
   }
 
@@ -128,4 +131,3 @@ template class dsMath::Preconditioner<double>;
 #include "Float128.hh"
 template class dsMath::Preconditioner<float128>;
 #endif
-
