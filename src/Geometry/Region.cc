@@ -1340,6 +1340,38 @@ void Region::Update(const std::vector<DoubleType> &result)
 }
 
 template <typename DoubleType>
+void Region::Update(const dsMath::ResultView<DoubleType> &result_view)
+{
+        absError = 0.0;
+        relError = 0.0;
+
+        if (!numequations)
+        {
+            return;
+        }
+
+        const EquationPtrMap_t &ep = GetEquationPtrList();
+        EquationPtrMap_t::const_iterator eit = ep.begin();
+        const EquationPtrMap_t::const_iterator eend = ep.end();
+        for ( ; eit != eend; ++eit)
+        {
+            const EquationHolder &eqptr = eit->second;
+            const std::string var = eqptr.GetVariable();
+
+            NodeModelPtr nm = std::const_pointer_cast<NodeModel, const NodeModel>(GetNodeModel(var));
+            dsAssert(nm.get(), "UNEXPECTED");
+
+            eqptr.Update(*nm, result_view);
+
+            DoubleType rerr = eqptr.GetRelError<DoubleType>();
+            DoubleType aerr = eqptr.GetAbsError<DoubleType>();
+
+            absError += aerr;
+            relError += rerr;
+        }
+}
+
+template <typename DoubleType>
 void Region::ACUpdate(const dsMath::ComplexDoubleVec_t<DoubleType> &result)
 {
         if (!numequations)
@@ -1744,4 +1776,3 @@ bool Region::UseExtendedPrecisionEquations() const
 #include "RegionInstantiate.cc"
 #undef DBLTYPE
 #endif
-

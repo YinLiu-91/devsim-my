@@ -6,6 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 ***/
 
 #include "ModelDataHolder.hh"
+#include <algorithm>
 
 void ModelDataHolder::clear_type(MDtype t) const
 {
@@ -241,6 +242,25 @@ void ModelDataHolder::set_indexes(const std::vector<size_t> &indexes, const std:
   is_uniform = false;
 }
 
+template <>
+void ModelDataHolder::set_indexes(const std::vector<size_t> &indexes, const double *v, size_t length_in)
+{
+  clear();
+
+  double_values.resize(length);
+
+  for (auto i : indexes)
+  {
+    if (i < length_in)
+    {
+      double_values[i] = v[i];
+    }
+  }
+
+  type = MDtype::DOUBLE;
+  is_uniform = false;
+}
+
 #ifdef DEVSIM_EXTENDED_PRECISION
 template <>
 void ModelDataHolder::set_indexes(const std::vector<size_t> &indexes, const std::vector<float128> &v)
@@ -265,6 +285,16 @@ void ModelDataHolder::set_values(const std::vector<double> &nv)
   clear_type(MDtype::EXTENDED);
   type = MDtype::DOUBLE;
   double_values = nv;
+  is_uniform = false;
+}
+
+template <>
+void ModelDataHolder::set_values(const double *nv, size_t length_in)
+{
+  clear_type(MDtype::EXTENDED);
+  type = MDtype::DOUBLE;
+  double_values.resize(length);
+  std::copy_n(nv, std::min(length, length_in), double_values.begin());
   is_uniform = false;
 }
 
@@ -319,4 +349,3 @@ void ModelDataHolder::SetValue(size_t index, const double &nv)
     double_values[index] = nv;
   }
 }
-

@@ -8,6 +8,13 @@ SPDX-License-Identifier: Apache-2.0
 #include "EquationHolder.hh"
 #include "Equation.hh"
 #include "MatrixEntries.hh"
+#include "NodeModel.hh"
+#include "Region.hh"
+#include "ObjectHolder.hh"
+#include "OutputStream.hh"
+#include <cstdlib>
+#include <memory>
+#include <sstream>
 namespace {
 template <typename T1, typename T2>
 void ConvertVector(const std::vector<std::complex<T1>> &src, std::vector<std::complex<T2>> &dest)
@@ -43,6 +50,28 @@ void ConvertRHSEntryVec(const dsMath::RHSEntryVec<T1> &src, dsMath::RHSEntryVec<
     {
       dest.push_back(std::make_pair(x.first, static_cast<T2>(x.second)));
     }
+}
+
+enum class DeviceUpdateStrategy {
+  FULLCOPY,
+  ROWS,
+};
+
+DeviceUpdateStrategy GetDeviceUpdateStrategy()
+{
+  if (const auto *v = std::getenv("DEVSIM_CUDSS_DEVICE_UPDATE_STRATEGY"))
+  {
+    const std::string val(v);
+    if ((val == "auto") || (val == "fullcopy"))
+    {
+      return DeviceUpdateStrategy::FULLCOPY;
+    }
+    if (val == "rows")
+    {
+      return DeviceUpdateStrategy::ROWS;
+    }
+  }
+  return DeviceUpdateStrategy::FULLCOPY;
 }
 }
 
@@ -192,6 +221,82 @@ void EquationHolder::Update(NodeModel &nm, const std::vector<double> &v) const
 #endif
 }
 
+template <>
+void EquationHolder::Update(NodeModel &nm, const dsMath::ResultView<double> &view) const
+{
+  if (view.host_cached_values)
+  {
+    Update(nm, *view.host_cached_values);
+    return;
+  }
+  if (double_ && view.device_result && view.device_result->valid &&
+      view.device_result->copy_to_host_double &&
+      !view.host_values && !view.host_cached_values)
+  {
+    if (GetDeviceUpdateStrategy() == DeviceUpdateStrategy::FULLCOPY)
+    {
+      auto values = std::make_shared<std::vector<double>>();
+      if (view.device_result->copy_to_host_double(*values))
+      {
+        view.host_cached_values = values;
+        Update(nm, *view.host_cached_values);
+        return;
+      }
+    }
+  }
+  if (double_ && view.device_result && view.device_result->valid &&
+      view.device_result->copy_rows_to_host_double &&
+      (GetDeviceUpdateStrategy() != DeviceUpdateStrategy::FULLCOPY))
+  {
+    if ((*double_).TryUpdateFromDevice(nm, *view.device_result))
+    {
+      return;
+    }
+  }
+  if (view.host_values)
+  {
+    Update(nm, *view.host_values);
+    return;
+  }
+  if (view.device_result && view.device_result->valid && view.device_result->copy_to_host_double)
+  {
+    if (!view.host_cached_values)
+    {
+      auto values = std::make_shared<std::vector<double>>();
+      if (view.device_result->copy_to_host_double(*values))
+      {
+        view.host_cached_values = values;
+      }
+    }
+    if (view.host_cached_values)
+    {
+      Update(nm, *view.host_cached_values);
+      return;
+    }
+  }
+  if (view.host_payload)
+  {
+    if (!view.host_cached_values)
+    {
+      auto values = std::make_shared<std::vector<double>>();
+      if (view.host_payload->GetDoubleList(*values))
+      {
+        view.host_cached_values = values;
+      }
+    }
+    if (view.host_cached_values)
+    {
+      Update(nm, *view.host_cached_values);
+      return;
+    }
+  }
+
+  std::ostringstream os;
+  os << "Device result consumption is not fully implemented for equation \""
+     << GetName() << "\" (token=\"" << view.device_token << "\")\n";
+  OutputStream::WriteOut(OutputStream::OutputType::FATAL, os.str());
+}
+
 #ifdef DEVSIM_EXTENDED_PRECISION
 template <>
 void EquationHolder::Update(NodeModel &nm, const std::vector<float128> &v) const
@@ -206,6 +311,32 @@ void EquationHolder::Update(NodeModel &nm, const std::vector<float128> &v) const
   {
     (*float128_).Update(nm, v);
   }
+}
+
+template <>
+void EquationHolder::Update(NodeModel &nm, const dsMath::ResultView<float128> &view) const
+{
+  if (view.host_values)
+  {
+    Update(nm, *view.host_values);
+    return;
+  }
+  if (view.device_result && view.device_result->valid && view.device_result->copy_to_host_double)
+  {
+    std::vector<double> host_values;
+    if (view.device_result->copy_to_host_double(host_values))
+    {
+      std::vector<float128> converted(host_values.size());
+      ConvertVector(host_values, converted);
+      Update(nm, converted);
+      return;
+    }
+  }
+
+  std::ostringstream os;
+  os << "Device result consumption is not fully implemented for equation \""
+     << GetName() << "\" (token=\"" << view.device_token << "\")\n";
+  OutputStream::WriteOut(OutputStream::OutputType::FATAL, os.str());
 }
 #endif
 
@@ -350,4 +481,3 @@ template double EquationHolder::GetAbsError() const;
 template float128 EquationHolder::GetRelError() const;
 template float128 EquationHolder::GetAbsError() const;
 #endif
-

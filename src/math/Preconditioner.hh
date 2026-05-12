@@ -8,6 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 #ifndef PRECONDITIONER_HH
 #define PRECONDITIONER_HH
 #include "dsMathTypes.hh"
+#include <string>
 namespace dsMath {
 template <typename DoubleType>
 class Matrix;
@@ -35,6 +36,25 @@ class Preconditioner {
     void SetTransposeSolve(bool);
 #endif
     bool GetTransposeSolve();
+    virtual bool HasDeviceResult() const
+    {
+      return false;
+    }
+    virtual std::string GetDeviceResultToken() const
+    {
+      return "";
+    }
+    virtual std::string GetDeviceResultLocation() const
+    {
+      return "host";
+    }
+    virtual ResultView<DoubleType> GetResultView() const
+    {
+      ResultView<DoubleType> out;
+      out.host_values = GetLastHostResult();
+      out.location = "host";
+      return out;
+    }
 
     inline size_t size() const {return size_;}
 
@@ -47,14 +67,18 @@ class Preconditioner {
     {
       return *matrix_;
     }
+    const DoubleVec_t<DoubleType> *GetLastHostResult() const
+    {
+      return last_host_result_;
+    }
 
   private:
     size_t size_;
     bool factored;
     PEnum::TransposeType_t transpose_solve_;
     Matrix<DoubleType> *matrix_;
+    mutable const DoubleVec_t<DoubleType> *last_host_result_;
 
 };
 }
 #endif
-

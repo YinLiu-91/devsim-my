@@ -69,6 +69,8 @@ class EquationHolder {
 
     template <typename DoubleType>
     void Update(NodeModel &, const dsMath::DoubleVec_t<DoubleType> &) const;
+    template <typename DoubleType>
+    void Update(NodeModel &, const dsMath::ResultView<DoubleType> &) const;
 
     template <typename DoubleType>
     void ACUpdate(NodeModel &, const dsMath::ComplexDoubleVec_t<DoubleType> &) const;
@@ -89,4 +91,3 @@ class EquationHolder {
 #endif
 };
 #endif
-

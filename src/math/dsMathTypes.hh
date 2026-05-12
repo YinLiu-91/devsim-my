@@ -10,8 +10,13 @@ SPDX-License-Identifier: Apache-2.0
 #ifdef DEVSIM_EXTENDED_PRECISION
 #include "Float128.hh"
 #endif
+#include "../common_api/ObjectHolder.hh"
 #include <vector>
 #include <complex>
+#include <string>
+#include <memory>
+#include <functional>
+#include <cstdint>
 namespace dsMath
 {
 
@@ -42,6 +47,28 @@ using ComplexDoubleVec_t = std::vector<ComplexDouble_t<DoubleType>>;
 
 template <typename DoubleType>
 using DoubleVec_t = std::vector<DoubleType>;
+
+struct DeviceResultBuffer
+{
+    bool valid = false;
+    std::string backend;
+    size_t length = 0;
+    std::uint64_t generation = 0;
+    std::function<bool(std::vector<double> &)> copy_to_host_double;
+    std::function<bool(const std::vector<size_t> &, std::vector<double> &)> copy_rows_to_host_double;
+};
+
+template <typename DoubleType>
+struct ResultView
+{
+    const DoubleVec_t<DoubleType> *host_values = nullptr;
+    const ObjectHolder *host_payload = nullptr;
+    mutable std::shared_ptr<DoubleVec_t<DoubleType>> host_cached_values;
+    const DeviceResultBuffer *device_result = nullptr;
+    bool has_device_values = false;
+    std::string device_token;
+    std::string location = "host";
+};
 
 typedef std::vector<int>    IntVec_t;
 

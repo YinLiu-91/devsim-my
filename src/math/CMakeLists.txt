@@ -10,6 +10,7 @@ SET (CXX_SRCS
     BlockPreconditioner.cc
     MathEnum.cc
     ExternalPreconditioner.cc
+    CuDSSPreconditioner.cc
     SolverUtil.cc
 )
 
@@ -45,4 +46,3 @@ INCLUDE_DIRECTORIES (
 )
 
 ADD_LIBRARY (math STATIC ${CXX_SRCS})
-

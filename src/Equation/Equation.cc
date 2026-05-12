@@ -33,6 +33,7 @@ SPDX-License-Identifier: Apache-2.0
 #include "Permutation.hh"
 
 #include <cmath>
+#include <algorithm>
 using std::abs;
 
 namespace EquationEnum
@@ -133,6 +134,113 @@ template <typename DoubleType>
 void Equation<DoubleType>::Update(NodeModel &nm, const dsMath::DoubleVec_t<DoubleType> &rhs)
 {
     UpdateValues(nm, rhs);
+}
+
+template <typename DoubleType>
+bool Equation<DoubleType>::TryUpdateFromDevice(NodeModel &nm, const dsMath::DeviceResultBuffer &device_result)
+{
+    if (!device_result.valid || !device_result.copy_rows_to_host_double)
+    {
+        return false;
+    }
+
+    const Region &reg = *myregion;
+    const size_t ind = reg.GetEquationIndex(myname);
+    if (ind == size_t(-1))
+    {
+      dsErrors::MissingEquationIndex(reg, myname, "", OutputStream::OutputType::FATAL) ;
+      return false;
+    }
+
+    const ConstNodeList &nl = myregion->GetNodeList();
+    std::vector<std::pair<size_t, size_t>> row_node_pairs;
+    row_node_pairs.reserve(nl.size());
+
+    for (auto nit = nl.begin(); nit != nl.end(); ++nit)
+    {
+        const size_t eqrow = reg.GetEquationNumber(ind, *nit);
+        if (eqrow >= device_result.length)
+        {
+            return false;
+        }
+        row_node_pairs.emplace_back(eqrow, (*nit)->GetIndex());
+    }
+
+    std::sort(row_node_pairs.begin(), row_node_pairs.end(),
+      [](const auto &a, const auto &b) { return a.first < b.first; });
+
+    std::vector<size_t> eqrows;
+    eqrows.reserve(row_node_pairs.size());
+    std::vector<size_t> node_indexes;
+    node_indexes.reserve(row_node_pairs.size());
+    for (const auto &rn : row_node_pairs)
+    {
+      eqrows.push_back(rn.first);
+      node_indexes.push_back(rn.second);
+    }
+
+    std::vector<double> gathered;
+    if (!device_result.copy_rows_to_host_double(eqrows, gathered))
+    {
+        return false;
+    }
+    if (gathered.size() != eqrows.size())
+    {
+        return false;
+    }
+
+    const NodeScalarList<DoubleType> &ovals = nm.GetScalarValues<DoubleType>();
+    NodeScalarList<DoubleType> upds(ovals.size());
+    for (size_t i = 0; i < gathered.size(); ++i)
+    {
+        upds[node_indexes[i]] = static_cast<DoubleType>(gathered[i]);
+    }
+
+    NodeScalarList<DoubleType> nvals(ovals.size());
+    if (updateType == EquationEnum::LOGDAMP)
+    {
+      LogSolutionUpdate(ovals, upds, nvals);
+    }
+    else if (updateType == EquationEnum::POSITIVE)
+    {
+      PositiveSolutionUpdate(ovals, upds, nvals);
+    }
+    else if (updateType == EquationEnum::DEFAULT)
+    {
+      DefaultSolutionUpdate(ovals, upds, nvals);
+    }
+    else
+    {
+      dsAssert(0, "UNEXPECTED");
+    }
+
+    nm.SetValues(nvals);
+
+    DoubleType aerr = 0.0;
+    DoubleType rerr = 0.0;
+    size_t aerr_node = 0;
+    for (size_t i = 0; i < upds.size(); ++i)
+    {
+        const DoubleType n1 = abs(upds[i]);
+        if (n1 > aerr)
+        {
+          aerr = n1;
+          aerr_node = i;
+        }
+
+        const DoubleType n2 = abs(nvals[i]);
+        const DoubleType nrerror = n1 / (n2 + minError);
+        if (nrerror > rerr)
+        {
+            rerr = nrerror;
+        }
+    }
+
+    setAbsError(aerr);
+    setRelError(rerr);
+    setAbsErrorNodeIndex(aerr_node);
+    setRelErrorNodeIndex(aerr_node);
+    return true;
 }
 
 template <typename DoubleType>
@@ -1322,4 +1430,3 @@ template class Equation<double>;
 #include "Float128.hh"
 template class Equation<float128>;
 #endif
-

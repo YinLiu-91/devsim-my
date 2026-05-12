@@ -353,6 +353,8 @@ class Region
     template <typename DoubleType>
     void Update(const dsMath::DoubleVec_t<DoubleType> &/*result*/);
     template <typename DoubleType>
+    void Update(const dsMath::ResultView<DoubleType> &/*result_view*/);
+    template <typename DoubleType>
     void ACUpdate(const dsMath::ComplexDoubleVec_t<DoubleType> &/*result*/);
     template <typename DoubleType>
     void NoiseUpdate(const std::string &/*output*/, const std::vector<PermutationEntry> &/*permvec*/, const dsMath::ComplexDoubleVec_t<DoubleType> &/*result*/);
@@ -505,4 +507,3 @@ class Region
 };
 
 #endif
-

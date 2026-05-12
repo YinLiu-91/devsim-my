@@ -359,6 +359,29 @@ void Device::Update(const dsMath::DoubleVec_t<DoubleType> &result)
 }
 
 template <typename DoubleType>
+void Device::Update(const dsMath::ResultView<DoubleType> &result_view)
+{
+    relError = 0.0;
+    absError = 0.0;
+    RegionList_t::iterator it = regionList.begin();
+    const RegionList_t::iterator end = regionList.end();
+    for ( ; it != end; ++it)
+    {
+        Region *rp = it->second;
+
+        rp->Update(result_view);
+        DoubleType rerr = rp->GetRelError<DoubleType>();
+        DoubleType aerr = rp->GetAbsError<DoubleType>();
+
+        if (aerr > absError)
+        {
+            absError = aerr;
+        }
+        relError += rerr;
+    }
+}
+
+template <typename DoubleType>
 void Device::ACUpdate(const dsMath::ComplexDoubleVec_t<DoubleType> &result)
 {
     RegionList_t::iterator it = regionList.begin();
@@ -471,4 +494,3 @@ void Device::SignalCallbacksOnInterface(const std::string &nm, const Region *rp)
 #include "DeviceInstantiate.cc"
 #undef DBLTYPE
 #endif
-

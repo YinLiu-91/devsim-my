@@ -63,6 +63,7 @@ class ObjectHolder {
     bool           IsList() const;
     bool           IsCallable() const;
     bool           GetDoubleList(std::vector<double> &) const;
+    bool           GetDoubleValues(double *, size_t) const;
     bool           GetComplexDoubleList(std::vector<std::complex<double>> &) const;
     bool           GetStringList(std::vector<std::string> &) const;
     bool           GetIntegerList(std::vector<int> &) const;
@@ -129,4 +130,3 @@ ObjectHolder CreateDoublePODArray(const std::vector<float128> &list);
 ObjectHolder CreateComplexDoublePODArray(const std::vector<complex128> &list);
 #endif
 #endif
-

@@ -158,6 +158,12 @@ void NodeModel::SetValues(const DoubleType &v) const
 }
 
 template <typename DoubleType>
+void NodeModel::SetValues(const DoubleType *v, size_t length) const
+{
+  const_cast<NodeModel *>(this)->SetValues(v, length);
+}
+
+template <typename DoubleType>
 void NodeModel::SetValues(const DoubleType &v)
 {
   if (mycontact)
@@ -168,6 +174,23 @@ void NodeModel::SetValues(const DoubleType &v)
   else
   {
     model_data.SetUniformValue<DoubleType>(v);
+  }
+
+  MarkOld();
+  uptodate = true;
+}
+
+template <>
+void NodeModel::SetValues(const double *v, size_t length)
+{
+  if (mycontact)
+  {
+    GetContactIndexes(); // safety
+    model_data.set_indexes(atcontact, v, length);
+  }
+  else
+  {
+    model_data.set_values(v, length);
   }
 
   MarkOld();
@@ -301,4 +324,3 @@ const std::string NodeModel::GetContactName() const
 #include "Float128.hh"
 #include "NodeModelInstantiate.cc"
 #endif
-

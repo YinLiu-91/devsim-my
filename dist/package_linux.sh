@@ -56,6 +56,7 @@ rsync -aqP --delete ../$i ${DIST_DIR}
 done
 rsync -aqP --delete ../python_packages ${DIST_PYDLL}
 rsync -aqP --delete ../umfpack ${DIST_PYDLL}
+rsync -aqP --delete ../cudss ${DIST_PYDLL}
 
 # Copy UMFPACK DLL
 cp -vf ${UMFPACK_LIBRARY_FILE} ${DIST_PYDLL}/umfpack
@@ -71,4 +72,3 @@ https://github.com/devsim/devsim
 commit ${COMMIT}
 EOF
 done
-

@@ -513,6 +513,49 @@ bool ObjectHolder::GetDoubleList(std::vector<double> &values) const
   return true;
 }
 
+bool ObjectHolder::GetDoubleValues(double *values, size_t length) const
+{
+  EnsurePythonGIL gil;
+
+  if (!object_ || values == nullptr)
+  {
+    return false;
+  }
+
+  ObjectHolder bytes;
+  std::string typecode;
+  long itemsize = 0;
+  GetArrayInfo(*this, typecode, itemsize, bytes);
+  if (!bytes.empty())
+  {
+    PyObject *bytes_obj = reinterpret_cast<PyObject *>(const_cast<void *>(bytes.GetObject()));
+    char *data = nullptr;
+    Py_ssize_t bytes_len = 0;
+    if ((PyBytes_AsStringAndSize(bytes_obj, &data, &bytes_len) == 0) &&
+        (bytes_len == static_cast<Py_ssize_t>(length * sizeof(double))))
+    {
+      std::copy_n(reinterpret_cast<const double *>(data), length, values);
+      return true;
+    }
+  }
+
+  ObjectHolderList_t objs;
+  if (!GetListOfObjects(objs) || (objs.size() != length))
+  {
+    return false;
+  }
+  for (size_t i = 0; i < length; ++i)
+  {
+    auto ent = objs[i].GetDouble();
+    if (!ent.first)
+    {
+      return false;
+    }
+    values[i] = ent.second;
+  }
+  return true;
+}
+
 bool ObjectHolder::GetComplexDoubleList(std::vector<std::complex<double>> &values) const
 {
   bool ret = GetArrayFromBytes<std::complex<double>>(*this, values, pod_info<double>::ptype, sizeof(double));
