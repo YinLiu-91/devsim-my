@@ -1,5 +1,6 @@
 # DEVSIM cuDSS 使用与验证说明
 
+配套架构设计见：`doc/cudss_architecture.md`
 配套优化方法论与复盘手册见：`doc/cudss_optimization_skill.md`
 
 ## 1. 环境准备
@@ -293,20 +294,20 @@ pytest 框架会自动探测 cuDSS 可用性：
 
 参考代码与可迁移模式：
 
-1. `cvxgrp/scs`  
-   - 文件：`linsys/cudss/direct/private.c`  
+1. `cvxgrp/scs`
+   - 文件：`linsys/cudss/direct/private.c`
    - 关键模式：初始化做 `ANALYSIS + FACTORIZATION`；迭代更新做 `REFACTORIZATION`；RHS/解向量 pinned staging。
-2. `ginkgo-project/ginkgo`  
-   - 文件：`extensions/cuda/solver/cudss.cpp`  
+2. `ginkgo-project/ginkgo`
+   - 文件：`extensions/cuda/solver/cudss.cpp`
    - 关键模式：`refactorize()` 明确仅做 `REFACTORIZATION`；可配 `cudssConfigSet`（reordering/hybrid）；绑定 stream。
-3. `owensgroup/RXMesh`  
-   - 文件：`include/rxmesh/diff/newton_solver.h`  
+3. `owensgroup/RXMesh`
+   - 文件：`include/rxmesh/diff/newton_solver.h`
    - 关键模式：Newton 框架内对线性求解阶段做独立计时（`pre_solve + solve`），便于定位瓶颈。
 
 对 DEVSIM 的映射（当前状态）：
 
-1. 已对齐：`ANALYSIS/REFACTORIZATION` 分阶段调用、pinned staging 开关、phase 级计时输出。  
-2. 进行中：analysis 复用命中率提升（结构指纹复用）、solver 包装耗时与 phase 耗时分离。  
+1. 已对齐：`ANALYSIS/REFACTORIZATION` 分阶段调用、pinned staging 开关、phase 级计时输出。
+2. 进行中：analysis 复用命中率提升（结构指纹复用）、solver 包装耗时与 phase 耗时分离。
 3. 待实施：`cudssConfigSet` 可调面（reordering/hybrid）系统化接入与参数扫描。
 
 已落地（当前实现）：

@@ -1,5 +1,8 @@
 # DEVSIM cuDSS 优化 skill / playbook
 
+配套架构设计见：`doc/cudss_architecture.md`
+配套使用说明见：`doc/cudss_usage.md`
+
 ## 1. 目标口径
 
 这份 playbook 不是介绍“怎么打开 cuDSS”，而是沉淀 **怎样在 DEVSIM 里做出有效的 cuDSS 优化**。
